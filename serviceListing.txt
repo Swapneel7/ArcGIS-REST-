@@ -1,0 +1,387 @@
+#!/usr/bin/python
+# Demonstrates how to check a folder for stopped services and print them.
+# The messages could alternatively be written to an e-mail or log file.
+# This script could be scheduled to run at a regular interval.
+
+# For Http calls
+
+import http.client, urllib.request, urllib.parse, urllib.error, json
+import csv
+# For system tools
+import sys, datetime
+from  pprint import pprint
+import zipfile
+from zipfile import ZipFile
+from zipfile import BadZipfile
+import xml.etree.ElementTree as ET
+import re
+import os
+import os.path
+from IPython.display import Markdown, display
+
+# For reading passwords without echoing
+import getpass
+import ssl
+sys.path.append('../Credentials/')
+from cfgGisMon import cfgGisMon
+
+# For reading passwords without echoing
+import getpass
+import ssl
+#import cfgGisMon
+import time
+
+# Bold print string
+def printmd(string):
+    display(Markdown(string))
+    
+def main(argv=None):
+    keys = cfgGisMon.keys()
+
+
+    with open('Arc01Listing_26feb.csv', 'w', newline='') as csvfile:
+        fieldNames = ['serverName','folderName','serviceName', 'serviceType','layerName', 'connectionPath','workspaceFactory','filePath']
+        spamWriter = csv.DictWriter(csvfile, fieldnames=fieldNames)
+        spamWriter.writeheader()
+        for serverName in cfgGisMon.keys(): 
+            portNum=cfgGisMon[serverName]['port']
+            protocol=cfgGisMon[serverName]['proto']
+            userName=cfgGisMon[serverName]['username']
+            password=cfgGisMon[serverName]['password']
+            
+            folderList = getFolderList(serverName,portNum, protocol,userName,password)
+            for folder in folderList:
+                print("###############$$$$$$%%%%%%%%%",folder)
+                serviceListings = getServiceListings(serverName,portNum, protocol, folder, userName,password)
+                
+                for service in serviceListings:
+                    print('********@@@@@@@@@@@', service)
+                    msdPathArr= getMSDFilePath(serverName,portNum, protocol, userName,password, folder, service)
+                    #pprint(msdPathArr)
+                    for path in msdPathArr:
+                        print("*******&&&&path", path)
+                        oldPath=path
+                        layerList = []
+                        if path and path.find('WorldCities') == -1:
+                            new_path = ''
+                            while True:
+                                path, base = os.path.split(path)
+                                new_path = os.path.join(base, new_path)
+                                
+                                if base == 'arcgissystem':
+                                    break
+                                    
+                            new_path = os.path.join(cfgGisMon[serverName]['dir'], new_path)
+                            print("Corrected Path", new_path)
+                            layerList = extractDataConnectionInfoFromMsdFile(new_path) 
+                        else:
+                            path='MSD Not Available'
+                            layer={'layerName': 'none', 'WorkspaceConnectionString': 'none', 'workspaceFactory':'none'}
+                            layerList.append(layer)
+                        #if new_path.find()
+                                          
+                        for layer in layerList:
+                            print("******************layer)********",layer)
+                            spamwriter = csv.writer(csvfile, delimiter=' ',quotechar='|', quoting=csv.QUOTE_MINIMAL)
+                            spamWriter.writerow({'serverName':serverName,'folderName':folder, 'serviceName':service[0], 'serviceType':service[1],'layerName': layer['layerName'], 'connectionPath':layer['WorkspaceConnectionString'], 'workspaceFactory':layer['workspaceFactory'], 'filePath':oldPath})
+                            csvfile.flush()
+                       # pprint(dataConnection)
+    csvfile.close()
+    return
+
+def getFolderList(serverName, serverPort, proto, username, password):
+    folderList = []
+    #print("GetFolderList arguments:-", serverName, serverPort, proto, username, password)
+    # add 'ROOT' folder to list
+    #folderList.append('ROOT')
+    
+    # Get a token
+    token = getToken(serverName, serverPort, proto, '/', username, password)
+    if token == "":
+        print("Could not generate a token with the username and password provided.")
+        return
+            
+    folderURL = "/arcgis/admin/services/"
+    
+    # This request only needs the token and the response formatting parameter 
+    params = urllib.parse.urlencode({'token': token, 'f': 'json'})
+    
+    headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
+    
+    # Connect to URL and post parameters   
+    if proto == "http":
+        httpConn = http.client.HTTPConnection(serverName, serverPort, context=ssl._create_unverified_context())
+    else:
+        httpConn = http.client.HTTPSConnection(serverName, serverPort, context=ssl._create_unverified_context())
+    
+    httpConn.request("POST", folderURL, params, headers)
+    
+    # Read response
+    response = httpConn.getresponse()
+    if (response.status != 200):
+        httpConn.close()
+        print("Could not read folder information.")
+        return
+    else:
+        data = response.read()
+        
+        # Check that data returned is not an error object
+        if not assertJsonSuccess(data):          
+            print("Error when reading folder information. " + str(data))
+##        else:
+##            print "Processed folder information successfully. Now processing services..."
+
+        # Deserialize response into Python object
+        dataObj = json.loads(data)
+        httpConn.close()
+        
+        #root entry
+        folderList.insert(0,'')
+        
+        # Loop through each service in the folder and stop or start it  
+        try:
+            for folder in dataObj['folders']:
+                print("insider folder listing ++++++++",folder)
+                folderList.append(str(folder))  
+            
+        except KeyError:print("Error Keyerr occured")
+        
+        
+    return folderList
+    
+
+    
+# Defines the entry point into the script
+def getServiceListings(serverName, serverPort, proto, folder, username, password):
+    
+    serviceList = []
+    # if serverPort not specified, set to a default of 6080
+    if serverPort == "":
+        serverPort = 6443
+    
+    # Get a token
+    print("**********folder ******", folder)
+    token = getToken(serverName, serverPort, proto, folder, username, password)
+    if token == "":
+        print("Could not generate a token with the username and password provided.")
+        return
+
+    # Construct URL to read folder
+    if str.upper(folder) == "ROOT":
+        folder = ""
+    else:
+        folder += "/"
+        
+    folderURL = "/arcgis/admin/services/" + folder
+
+    # This request only needs the token and the response formatting parameter 
+    params = urllib.parse.urlencode({'token': token, 'f': 'json'})
+
+    headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
+
+    # Connect to URL and post parameters   
+    if proto == "http":
+        httpConn = http.client.HTTPConnection(serverName, serverPort, context=ssl._create_unverified_context())
+    else:
+        httpConn = http.client.HTTPSConnection(serverName, serverPort, context=ssl._create_unverified_context())
+
+    httpConn.request("POST", folderURL, params, headers)
+    pprint(folderURL)
+    #time(5)
+    # Read response
+    response = httpConn.getresponse()
+    if (response.status != 200):
+        httpConn.close()
+        print("Could not read folder information.")
+        return
+    else:
+        data = response.read()
+    
+        # Check that data returned is not an error object
+        if not assertJsonSuccess(data):          
+            print("Error when reading folder information. " + str(data))
+
+        # Deserialize response into Python object
+        dataObj = json.loads(data)
+        httpConn.close()
+        try:
+            serviceDetails = dataObj['services']
+            
+            for each in serviceDetails:
+                record=[]
+                record.append(str(each['serviceName']))
+                record.append(str(each['type']))
+                print("%%%%%%%%%%%%%%", each['serviceName'])
+                serviceList.append(record)
+        except KeyError: print("key wrrorwe")
+    if serviceList is not None:    
+        return serviceList
+    
+# Loop through each service in the folder and stop or start it    
+def getMSDFilePath(serverName, serverPort ,protocol, username, password, folder, service):
+    #fullSvcName = serviceName + "." + item['type'] 
+    filePathStrArr = []
+    serviceName=service[0]
+    serviceType=service[1]
+    myServiceSS=  "https://"+ serverName + ":6443/arcgis/admin/services/"+ str(folder) + "/" + str(serviceName).replace("/", ".", 1) + "." +serviceType +"?f=pjson"
+    myManifestURL = myServiceSS.split('url:')[-1]
+    myManifestURL1 = myManifestURL.replace(">", "")
+    myManifestURL2 = myManifestURL1.replace("rest", "admin")
+    print('URL name generated',myManifestURL2)
+     # Connect to URL and post parameters  
+    token = getToken(serverName, serverPort, protocol, '/', username, password)
+    if token == "":
+        print("Could not generate a token with the username and password provided.")
+        return
+            
+    params = urllib.parse.urlencode({'token': token, 'f': 'json'})
+    headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
+    #if proto == "http":
+    #   httpConn = http.client.HTTPConnection(serverName, serverPort, context=ssl._create_unverified_context())
+    #else:
+    httpConn = http.client.HTTPSConnection(serverName, serverPort, context=ssl._create_unverified_context())
+
+    # Read status response
+    httpConn.request("POST", myManifestURL2, params, headers)
+    statusResponse = httpConn.getresponse()
+    if (statusResponse.status != 200):
+        httpConn.close()
+        print("Error while checking status for " + serviceName)
+        return
+    else:
+        statusData = statusResponse.read()
+                      
+        # Check that data returned is not an error object
+        if not assertJsonSuccess(statusData):
+
+            print("Not Found \n")
+        else:
+
+            statusDataObj = json.loads(statusData)
+            propertiesObj = statusDataObj["properties"]
+            keys =   propertiesObj.keys()
+            #
+            try:
+                filePathStr= propertiesObj.get("filePath")
+                print("\n*******\n MSD FilePath:-", serverName, folder, serviceName, filePathStr)
+
+                filePathStrArr.append(filePathStr)
+                
+            except KeyError:print("Error occured")
+            except IndexError: print('No databases connection')    
+          
+ 
+
+    return filePathStrArr
+
+# A function to fetch /parse the dataconnection string
+# A function to fetch and parse the json object
+def extractDataConnectionInfoFromMsdFile(msd_file_name):
+    
+    dci = []    
+    
+    msd_file_name1= msd_file_name[:-1]
+    msd_file_name_correct=msd_file_name1.replace('\\','\\\\')
+    print(msd_file_name_correct)
+    print(os.path.isfile(msd_file_name_correct))
+
+    try:
+        zf = zipfile.ZipFile(msd_file_name_correct, 'r')
+
+        for this_zip in zf.namelist():
+            
+            print("INFO:check is layer xml:" + this_zip)
+
+            layerFolder = ''
+            if this_zip =='DocumentInfo.xml':
+                with open(this_zip, 'rt') as f:
+                    tree = ET.parse(f)
+                    layerName=tree.find('ActiveMapRepositoryPath')
+                    layerInfo = tree.find('ActiveMapRepositoryPath').text
+                    folderName = layerInfo.split('CIMPATH')[1]
+                    layerFolder = folderName.split('/')[0]
+                    print('!!!!!!!!!!!!+++++++++++\nlayername', layerFolder)
+                    
+            if re.search(layerFolder, this_zip) and this_zip != '^/layers.xml' and re.search('.xml',this_zip):
+                osFile = this_zip
+                filename = os.path.splitext(osFile)[0]
+                fileName = filename.split("/",1)[-1]
+                print("layer name    ---",fileName)  
+                xml_obj = ET.fromstring(zf.read(this_zip))
+                
+                for this_item in xml_obj.findall('FeatureTable'):
+                    if this_item.find('DataConnection').find('WorkspaceConnectionString') is not None:
+                        databaseConnection=this_item.find('DataConnection').find('WorkspaceConnectionString').text
+                        databaseConnectionStr = re.sub(r'ENCRYPTED_PASSWORD=[0-9a-f]*(;|$)',r'',databaseConnection)
+                        workspaceFactory='none'
+                        if this_item.find('DataConnection').find('WorkspaceFactory') is not None:
+                            workspaceFactory=this_item.find('DataConnection').find('WorkspaceFactory').text
+                        dci.append({'layerName': fileName, 'WorkspaceConnectionString': databaseConnectionStr, 'workspaceFactory':workspaceFactory})
+
+                    else:
+                        dci.append({'layerName': fileName, 'WorkspaceConnectionString': 'none', 'workspaceFactory':'none'})
+                    #if this_item.find('DataConnection').find('WorkspaceFactory') is not None:
+                        
+            else:
+                dci.append({'layerName': 'none', 'WorkspaceConnectionString': 'none', 'workspaceFactory':'none'})
+                                        
+    except FileNotFoundError: print("File not found error")
+    except BadZipfile: print("tbx or other file format")
+    except PermissionError: print("Inadequate permissions")
+    
+    return dci
+
+
+# A function to generate a token given username, password and the adminURL.
+# def getToken(username, password, serverName, serverPort):
+def getToken(serverName, serverPort, proto, folder, username, password):
+    # Token URL is typically http://server[:port]/arcgis/admin/generateToken
+    tokenURL = "/arcgis/admin/generateToken"
+    
+    params = urllib.parse.urlencode({'username': username, 'password': password, 'client': 'requestip', 'f': 'json'})
+    
+    headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
+    
+    # Connect to URL and post parameters   
+    if proto == "http":
+        httpConn = http.client.HTTPConnection(serverName, serverPort, context=ssl._create_unverified_context())
+    else:
+        httpConn = http.client.HTTPSConnection(serverName, serverPort, context=ssl._create_unverified_context())
+
+    httpConn.request("POST", tokenURL, params, headers)
+    
+    # Read response
+    response = httpConn.getresponse()
+    if (response.status != 200):
+        httpConn.close()
+        # print "Error while fetching tokens from admin URL. Please check the URL and try again."
+        return
+    else:
+        data = response.read()
+       
+        
+        httpConn.close()
+        
+        # Check that data returned is not an error object
+        if not assertJsonSuccess(data):            
+            return
+        
+        # Extract the token from it
+        token = json.loads(data)        
+        return token['token']            
+        
+
+# A function that checks that the input JSON object 
+#  is not an error object.
+def assertJsonSuccess(data):
+    obj = json.loads(data)
+    if 'status' in obj and obj['status'] == "error":
+        # print "Error: JSON object returns an error. " + str(obj)
+        return False
+    else:
+        return True
+    
+        
+# Script start
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
